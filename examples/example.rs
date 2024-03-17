@@ -1,7 +1,5 @@
 extern crate single_instance;
 
-use single_instance::SingleInstance;
-
 fn main() {
     {
         let instance_a = SingleInstance::new("aa2d0258-ffe9-11e7-ba89-0ed5f89f718b").unwrap();
