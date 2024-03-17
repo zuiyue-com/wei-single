@@ -94,46 +94,75 @@ mod inner {
 
 #[cfg(any(target_os = "linux", target_os="android"))]
 mod inner {
-    use error::Result;
-    use nix::sys::socket::{self, UnixAddr};
-    use nix::unistd;
+    use std::io::ErrorKind;
     use std::os::unix::prelude::RawFd;
+    use nix::unistd;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::os::fd::IntoRawFd;
+    use std::io::Result;
 
     /// A struct representing one running instance.
     pub struct SingleInstance {
-        maybe_sock: Option<RawFd>,
+        socket: Option<RawFd>,
+        single: bool,
     }
 
     impl SingleInstance {
         /// Returns a new SingleInstance object.
         pub fn new(name: &str) -> Result<Self> {
-            let addr = UnixAddr::new_abstract(name.as_bytes())?;
-            let sock = socket::socket(
-                socket::AddressFamily::Unix,
-                socket::SockType::Stream,
-                socket::SockFlag::empty(),
-                None,
-            )?;
+            let socket_path = "/tmp/".to_string() + name + ".sock";
+            let single;
 
-            let maybe_sock = match socket::bind(sock, &socket::SockAddr::Unix(addr)) {
-                Ok(()) => Some(sock),
-                Err(nix::errno::Errno::EADDRINUSE) => None,
-                Err(e) => return Err(e.into()),
+            let socket = match UnixListener::bind(&socket_path) {
+                Ok(socket) => {
+                    single = true;
+                    Some(socket.into_raw_fd())
+                },
+                Err(ref e) if e.kind() == ErrorKind::AddrInUse => {
+                    // Try to connect to the socket.
+                    match UnixStream::connect(&socket_path) {
+                        Ok(_) => {
+                            // If the connection is successful, there is another instance running.
+                            single = false;
+                            None
+                        },
+                        Err(_) => {
+                            // If the connection fails, the socket file is orphaned. Delete it and try again.
+                            std::fs::remove_file(&socket_path)?;
+                            match UnixListener::bind(&socket_path) {
+                                Ok(socket) => {
+                                    single = true;
+                                    Some(socket.into_raw_fd())
+                                },
+                                Err(_) => {
+                                    single = false;
+                                    None
+                                },
+                            }
+                        },
+                    }
+                },
+                Err(_) => {
+                    single = false;
+                    None
+                },
             };
 
-            Ok(Self { maybe_sock })
+            Ok(Self {
+                socket,
+                single,
+            })
         }
 
         /// Returns whether this instance is single.
         pub fn is_single(&self) -> bool {
-            self.maybe_sock.is_some()
+            self.single
         }
     }
 
     impl Drop for SingleInstance {
         fn drop(&mut self) {
-            if let Some(sock) = self.maybe_sock {
-                // Intentionally discard any close errors.
+            if let Some(sock) = self.socket {
                 let _ = unistd::close(sock);
             }
         }
